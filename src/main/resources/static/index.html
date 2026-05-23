@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DPI Engine Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+        :root { --bg:#0f172a; --panel:#1e293b; --accent:#38bdf8; --danger:#ef4444; --ok:#22c55e; --text:#e2e8f0; --muted:#94a3b8; }
+        * { box-sizing: border-box; }
+        body { margin:0; font-family:system-ui,-apple-system,sans-serif; background:var(--bg); color:var(--text); }
+        .container { max-width:1100px; margin:0 auto; padding:24px; }
+        h1 { margin:0 0 4px; font-size:1.6rem; }
+        .subtitle { color:var(--muted); margin-bottom:20px; font-size:0.95rem; }
+        .card { background:var(--panel); border-radius:12px; padding:20px; margin-bottom:18px; border:1px solid #334155; }
+        .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; margin-bottom:18px; }
+        .metric { text-align:center; }
+        .metric-value { font-size:2rem; font-weight:700; color:var(--accent); }
+        .metric-label { color:var(--muted); font-size:0.85rem; margin-top:4px; text-transform:uppercase; letter-spacing:0.05em; }
+        .metric.danger .metric-value { color:var(--danger); }
+        .metric.ok .metric-value { color:var(--ok); }
+        label { display:block; font-size:0.85rem; color:var(--muted); margin-bottom:6px; margin-top:12px; }
+        input[type="file"], input[type="text"], select { width:100%; padding:10px 12px; border-radius:8px; border:1px solid #475569; background:#0b1220; color:var(--text); }
+        .row { display:flex; gap:12px; flex-wrap:wrap; }
+        .row > * { flex:1; min-width:200px; }
+        button { background:var(--accent); color:#0f172a; border:none; padding:12px 24px; border-radius:8px; font-weight:700; cursor:pointer; margin-top:16px; }
+        button:hover { opacity:0.9; }
+        button:disabled { opacity:0.5; cursor:not-allowed; }
+        .tags { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+        .tag { background:#334155; padding:4px 10px; border-radius:20px; font-size:0.8rem; display:flex; align-items:center; gap:6px; }
+        .tag button { background:none; color:var(--danger); padding:0; margin:0; font-size:1rem; line-height:1; }
+        .hidden { display:none; }
+        .progress { height:6px; background:#334155; border-radius:3px; overflow:hidden; margin-top:12px; }
+        .progress-bar { height:100%; background:var(--accent); width:0%; transition:width 0.3s; }
+        table { width:100%; border-collapse:collapse; margin-top:12px; font-size:0.9rem; }
+        th, td { text-align:left; padding:10px; border-bottom:1px solid #334155; }
+        th { color:var(--muted); font-weight:600; text-transform:uppercase; font-size:0.75rem; }
+        .badge { font-size:0.75rem; padding:2px 8px; border-radius:12px; background:#334155; }
+        .badge.blocked { background:var(--danger); color:#fff; }
+        .actions { display:flex; gap:10px; margin-top:12px; }
+        .actions a { color:var(--accent); text-decoration:none; font-size:0.9rem; }
+        .chart-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:18px; }
+        .chart-box { height:260px; position:relative; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>DPI Engine Dashboard</h1>
+    <div class="subtitle">Upload PCAP -> Set Rules -> Analyze -> Download Filtered PCAP</div>
+
+    <div class="card">
+        <div class="row">
+            <div>
+                <label>PCAP File</label>
+                <input type="file" id="pcap" accept=".pcap">
+            </div>
+            <div>
+                <label>Engine Mode</label>
+                <select id="mode">
+                    <option value="simple">Simple (single-threaded)</option>
+                    <option value="multi" selected>Multi-threaded (2 LB x 2 FP)</option>
+                </select>
+            </div>
+        </div>
+
+        <label>Block Applications</label>
+        <div class="row">
+            <input type="text" id="appInput" placeholder="e.g. YOUTUBE then press Enter">
+        </div>
+        <div class="tags" id="appTags"></div>
+
+        <label>Block Domains (substring match)</label>
+        <div class="row">
+            <input type="text" id="domainInput" placeholder="e.g. facebook then press Enter">
+        </div>
+        <div class="tags" id="domainTags"></div>
+
+        <label>Block IPs</label>
+        <div class="row">
+            <input type="text" id="ipInput" placeholder="e.g. 192.168.1.50 then press Enter">
+        </div>
+        <div class="tags" id="ipTags"></div>
+
+        <button id="btnAnalyze" onclick="startAnalysis()">Analyze Traffic</button>
+        <div class="progress hidden" id="progressWrap"><div class="progress-bar" id="progressBar"></div></div>
+        <div id="statusText" style="margin-top:8px;color:var(--muted);font-size:0.85rem;"></div>
+    </div>
+
+    <div id="results" class="hidden">
+        <div class="grid">
+            <div class="metric"><div class="metric-value" id="mTotal">0</div><div class="metric-label">Total Packets</div></div>
+            <div class="metric"><div class="metric-value" id="mBytes">0</div><div class="metric-label">Total Bytes</div></div>
+            <div class="metric ok"><div class="metric-value" id="mFwd">0</div><div class="metric-label">Forwarded</div></div>
+            <div class="metric danger"><div class="metric-value" id="mDrop">0</div><div class="metric-label">Dropped</div></div>
+        </div>
+
+        <div class="card">
+            <div class="chart-grid">
+                <div><h3 style="margin-top:0">Application Breakdown</h3><div class="chart-box"><canvas id="appChart"></canvas></div></div>
+                <div><h3 style="margin-top:0">Allowed vs Blocked</h3><div class="chart-box"><canvas id="blockChart"></canvas></div></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3 style="margin-top:0">Detected SNIs / Hosts</h3>
+            <table>
+                <thead><tr><th>SNI / Host</th><th>Application</th></tr></thead>
+                <tbody id="sniTable"></tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h3 style="margin-top:0">Downloads</h3>
+            <div class="actions">
+                <a href="#" id="dlPcap" target="_blank">Download Output PCAP</a>
+                <a href="#" id="dlCsv" target="_blank">Download Report CSV</a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+const tags = { app:[], domain:[], ip:[] };
+['app','domain','ip'].forEach(t => {
+    document.getElementById(t+'Input').addEventListener('keydown', e => {
+        if(e.key==='Enter'){ e.preventDefault(); const v=e.target.value.trim(); if(v){ tags[t].push(v); renderTags(t); e.target.value=''; } }
+    });
+});
+function renderTags(type){
+    const el=document.getElementById(type+'Tags');
+    el.innerHTML=tags[type].map((v,i)=>`<span class="tag">${v}<button onclick="tags['${type}'].splice(${i},1);renderTags('${type}')">&times;</button></span>`).join('');
+}
+
+let pollTimer=null;
+async function startAnalysis(){
+    const file=document.getElementById('pcap').files[0];
+    if(!file){ alert('Select a PCAP file'); return; }
+    const btn=document.getElementById('btnAnalyze');
+    btn.disabled=true;
+    document.getElementById('results').classList.add('hidden');
+    document.getElementById('progressWrap').classList.remove('hidden');
+    document.getElementById('progressBar').style.width='10%';
+    document.getElementById('statusText').textContent='Uploading...';
+
+    const form=new FormData();
+    form.append('pcap',file);
+    form.append('simple', document.getElementById('mode').value==='simple');
+    tags.app.forEach(v=>form.append('blockApp',v));
+    tags.domain.forEach(v=>form.append('blockDomain',v));
+    tags.ip.forEach(v=>form.append('blockIp',v));
+
+    try{
+        const res=await fetch('/api/analyze',{method:'POST',body:form});
+        if(!res.ok) throw new Error('Analyze request failed with status '+res.status);
+        const job=await res.json();
+        document.getElementById('progressBar').style.width='30%';
+        document.getElementById('statusText').textContent='Job '+job.id+' running...';
+        pollTimer=setInterval(()=>poll(job.id),1000);
+    }catch(e){
+        alert('Upload failed: '+e.message);
+        btn.disabled=false;
+    }
+}
+
+async function poll(id){
+    const res=await fetch('/api/jobs/'+id);
+    if(!res.ok){
+        clearInterval(pollTimer);
+        document.getElementById('btnAnalyze').disabled=false;
+        alert('Polling failed with status '+res.status);
+        return;
+    }
+    const job=await res.json();
+    if(job.status==='RUNNING') document.getElementById('progressBar').style.width='70%';
+    if(job.status==='COMPLETED'){
+        clearInterval(pollTimer);
+        document.getElementById('progressBar').style.width='100%';
+        document.getElementById('statusText').textContent='Completed in '+(job.endTime-job.startTime)+' ms';
+        showResults(job.report, id);
+        document.getElementById('btnAnalyze').disabled=false;
+    }
+    if(job.status==='FAILED'){
+        clearInterval(pollTimer);
+        alert('Failed: '+job.errorMessage);
+        document.getElementById('btnAnalyze').disabled=false;
+    }
+}
+
+let appChartInst=null, blockChartInst=null;
+
+function showResults(r, id){
+    document.getElementById('results').classList.remove('hidden');
+    document.getElementById('mTotal').textContent=r.totalPackets.toLocaleString();
+    document.getElementById('mBytes').textContent=r.totalBytes.toLocaleString();
+    document.getElementById('mFwd').textContent=r.forwarded.toLocaleString();
+    document.getElementById('mDrop').textContent=r.dropped.toLocaleString();
+
+    const sniBody=document.getElementById('sniTable');
+    sniBody.innerHTML=r.detectedSnis.map(s=>`<tr><td>${escapeHtml(s.sni)}</td><td><span class="badge">${escapeHtml(s.appType)}</span></td></tr>`).join('') || '<tr><td colspan="2" style="color:var(--muted)">No SNIs detected</td></tr>';
+
+    document.getElementById('dlPcap').href='/api/jobs/'+id+'/output';
+    document.getElementById('dlCsv').href='/api/jobs/'+id+'/report.csv';
+
+    const appLabels=r.appBreakdown.map(a=>a.appType);
+    const appData=r.appBreakdown.map(a=>a.count);
+    const appColors=['#38bdf8','#818cf8','#34d399','#fbbf24','#f472b6','#a78bfa','#fb923c','#94a3b8'];
+
+    if(appChartInst) appChartInst.destroy();
+    appChartInst=new Chart(document.getElementById('appChart'),{
+        type:'doughnut',
+        data:{ labels:appLabels, datasets:[{data:appData,backgroundColor:appColors,borderWidth:0}] },
+        options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'right',labels:{color:'#e2e8f0'}}}}
+    });
+
+    if(blockChartInst) blockChartInst.destroy();
+    blockChartInst=new Chart(document.getElementById('blockChart'),{
+        type:'bar',
+        data:{ labels:['Allowed','Blocked'], datasets:[{data:[r.forwarded,r.dropped],backgroundColor:['#22c55e','#ef4444'],borderWidth:0}] },
+        options:{ responsive:true, maintainAspectRatio:false, scales:{y:{beginAtZero:true,ticks:{color:'#94a3b8'}},x:{ticks:{color:'#94a3b8'}}}, plugins:{legend:{display:false}}}
+    });
+}
+
+function escapeHtml(t){ const d=document.createElement('div'); d.textContent=t; return d.innerHTML; }
+</script>
+</body>
+</html>

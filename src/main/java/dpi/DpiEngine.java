@@ -9,6 +9,7 @@ import dpi.parser.PacketParser;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -32,6 +33,7 @@ public class DpiEngine {
     private final AtomicLong udpPackets = new AtomicLong(0);
     private final AtomicLong forwarded = new AtomicLong(0);
     private final AtomicLong dropped = new AtomicLong(0);
+    private volatile TrafficReport report;
 
     public DpiEngine(String inputPath, String outputPath, RuleManager ruleManager, int numLBs, int fpsPerLb) {
         this.inputPath = inputPath;
@@ -108,7 +110,22 @@ public class DpiEngine {
                 }
             }
         }
+        report = ReportBuilder.build(
+                totalPackets.get(),
+                totalBytes.get(),
+                tcpPackets.get(),
+                udpPackets.get(),
+                forwarded.get(),
+                dropped.get(),
+                appCounts,
+                detectedSnis,
+                ruleManager
+        );
         printReport(appCounts, detectedSnis);
+    }
+
+    public TrafficReport getReport() {
+        return report;
     }
 
     private void readerTask(ThreadSafeQueue<ParsedPacket>[] lbQueues) {
@@ -203,6 +220,7 @@ public class DpiEngine {
             System.err.println("Usage: java -jar dpi.jar input.pcap output.pcap [options]");
             System.err.println("  --block-app <App>  --block-ip <IP>  --block-domain <domain>");
             System.err.println("  --lbs <n>  --fps <n>  --simple");
+            System.err.println("  --report-json <path>  --report-csv <path>");
             System.exit(1);
         }
 
@@ -214,6 +232,8 @@ public class DpiEngine {
         boolean simple = false;
         int lbs = 2;
         int fps = 2;
+        String reportJsonPath = null;
+        String reportCsvPath = null;
 
         for (int i = 2; i < args.length; i++) {
             switch (args[i]) {
@@ -222,6 +242,8 @@ public class DpiEngine {
                 case "--block-domain" -> { if (i + 1 < args.length) blockDomains.add(args[++i]); }
                 case "--lbs" -> { if (i + 1 < args.length) lbs = Integer.parseInt(args[++i]); }
                 case "--fps" -> { if (i + 1 < args.length) fps = Integer.parseInt(args[++i]); }
+                case "--report-json" -> { if (i + 1 < args.length) reportJsonPath = args[++i]; }
+                case "--report-csv" -> { if (i + 1 < args.length) reportCsvPath = args[++i]; }
                 case "--simple" -> simple = true;
             }
         }
@@ -236,10 +258,26 @@ public class DpiEngine {
             }
         }
 
+        long start = System.currentTimeMillis();
+        TrafficReport report;
         if (simple) {
-            new DpiSimple(input, output, rules).run();
+            DpiSimple engine = new DpiSimple(input, output, rules);
+            engine.run();
+            report = engine.getReport();
         } else {
-            new DpiEngine(input, output, rules, lbs, fps).run();
+            DpiEngine engine = new DpiEngine(input, output, rules, lbs, fps);
+            engine.run();
+            report = engine.getReport();
+        }
+
+        if (report != null) {
+            report.setProcessingTimeMs(System.currentTimeMillis() - start);
+            if (reportJsonPath != null) {
+                ReportExporter.exportJson(report, Path.of(reportJsonPath));
+            }
+            if (reportCsvPath != null) {
+                ReportExporter.exportCsv(report, Path.of(reportCsvPath));
+            }
         }
     }
 }

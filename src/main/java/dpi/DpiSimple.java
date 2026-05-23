@@ -31,6 +31,7 @@ public class DpiSimple {
     private long dropped;
     private final Map<AppType, Long> appCounts = new HashMap<>();
     private final Set<String> detectedSnis = new LinkedHashSet<>();
+    private volatile TrafficReport report;
 
     public DpiSimple(String inputPath, String outputPath, RuleManager rules) throws IOException {
         this.ruleManager = rules;
@@ -108,7 +109,22 @@ public class DpiSimple {
 
         reader.close();
         writer.close();
+        report = ReportBuilder.build(
+                totalPackets,
+                totalBytes,
+                tcpPackets,
+                udpPackets,
+                forwarded,
+                dropped,
+                appCounts,
+                detectedSnis,
+                ruleManager
+        );
         printReport();
+    }
+
+    public TrafficReport getReport() {
+        return report;
     }
 
     private void printReport() {

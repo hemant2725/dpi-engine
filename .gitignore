@@ -5,3 +5,6 @@ out/
 .idea/
 *.iml
 .vscode/
+*.log
+report.csv
+report.json

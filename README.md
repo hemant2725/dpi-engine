@@ -1,236 +1,359 @@
 # DPI Engine (Java)
 
-A Java Deep Packet Inspection (DPI) pipeline that reads packets from a PCAP file, parses network headers, classifies traffic by app/domain heuristics, applies blocking rules, and writes allowed packets to an output PCAP.
+A production-grade Deep Packet Inspection engine written in pure Java that parses PCAP files, extracts TLS SNI / HTTP Host headers, classifies traffic by application, applies blocking rules, and generates structured reports.
 
-This project supports:
-- A multi-threaded pipeline (`dpi.DpiEngine`)
-- A single-threaded reference pipeline (`dpi.DpiSimple`)
-- A synthetic PCAP generator for local testing (`dpi.PcapGenerator`)
+**Two execution modes:**
+- **CLI** — offline PCAP analysis with JSON/CSV export
+- **Server** — Spring Boot REST API + single-page Web Dashboard
+
+---
+
+## Table of Contents
+
+1. [Features](#features)
+2. [Architecture](#architecture)
+3. [Project Structure](#project-structure)
+4. [Prerequisites](#prerequisites)
+5. [Build](#build)
+6. [CLI Usage](#cli-usage)
+7. [REST API](#rest-api)
+8. [Web Dashboard](#web-dashboard)
+9. [Report Format](#report-format)
+10. [Test Data Generation](#test-data-generation)
+11. [Roadmap](#roadmap)
+
+---
 
 ## Features
 
-- PCAP read/write (Ethernet link type)
-- IPv4 + TCP/UDP parsing
-- Flow tracking using normalized 5-tuples
-- TLS SNI extraction (ClientHello, port 443)
-- HTTP Host header extraction
-- App classification by host/SNI + fallback by destination port
-- Rule-based blocking by:
-  - Source IP
-  - App type
-  - Domain substring
-- Throughput report summary:
-  - Packet and byte totals
-  - TCP/UDP counts
-  - Forwarded/dropped counts
-  - App breakdown
-  - Detected SNIs
+| Feature | Status |
+|---------|--------|
+| PCAP read/write (little-endian) | ✅ |
+| Ethernet → IPv4 → TCP/UDP parsing | ✅ |
+| TLS SNI extraction (Client Hello) | ✅ |
+| HTTP Host header extraction | ✅ |
+| Application classification (YouTube, Facebook, Google, etc.) | ✅ |
+| Blocking rules by IP, App, Domain | ✅ |
+| Single-threaded engine (`DpiSimple`) | ✅ |
+| Multi-threaded pipeline (`DpiEngine`) | ✅ |
+| Consistent hashing (flow affinity, lock-free) | ✅ |
+| JSON & CSV report export | ✅ |
+| Spring Boot REST API | ✅ |
+| Web UI Dashboard (drag-drop, live charts) | ✅ |
+| Poison-pill graceful shutdown | ✅ |
 
-## Tech Stack
+---
 
-- Java 17
-- Maven (build + packaging)
-- No external runtime dependencies
+## Architecture
+
+### Single-Threaded (`DpiSimple`)
+
+```
+PCAP Reader → Packet Parser → SNI/Host Extractor → Classifier → Rule Manager → Writer → Report
+```
+
+### Multi-Threaded (`DpiEngine`)
+
+```
+ReaderThread
+      ↓
+  hash(5-tuple) % numLBs
+      ↓
+LoadBalancer threads (default: 2)
+      ↓
+  hash(5-tuple) % numFPs
+      ↓
+FastPath threads (default: 2 per LB = 4 total)
+      ↓
+  OutputQueue
+      ↓
+WriterThread
+```
+
+**Key design decisions:**
+- **Consistent hashing** ensures the same 5-tuple always lands on the same `FastPath` thread.
+- **No shared state** — each `FastPath` owns a private `HashMap<FiveTuple, Flow>`; zero locks.
+- **Poison-pill shutdown** — `RawPacket` with `null` data propagates through queues to signal EOF.
+- **Byte order discipline** — `LITTLE_ENDIAN` for PCAP headers, `BIG_ENDIAN` for network protocols.
+
+---
 
 ## Project Structure
 
-```text
-src/main/java/dpi
-  DpiEngine.java          # multi-threaded engine entry point
-  DpiSimple.java          # single-threaded engine
-  PcapGenerator.java      # synthetic test PCAP generator
-
-src/main/java/dpi/engine
-  AppClassifier.java      # host/SNI + port based classification
-  ConnectionTracker.java  # simple-mode flow table
-  FastPath.java           # per-worker DPI processor
-  LoadBalancer.java       # flow-affine packet routing
-  RuleManager.java        # block rules
-  ThreadSafeQueue.java    # bounded queue wrapper (capacity 10,000)
-
-src/main/java/dpi/inspector
-  SniExtractor.java       # TLS SNI parser
-  HttpHostExtractor.java  # HTTP Host parser
-
-src/main/java/dpi/io
-  PcapReader.java
-  PcapWriter.java
-
-src/main/java/dpi/model
-  AppType.java
-  FiveTuple.java
-  Flow.java
-  ParsedPacket.java
-  RawPacket.java
-
-src/main/java/dpi/parser
-  PacketParser.java
 ```
+src/main/java/dpi/
+├── model/
+│   ├── AppType.java              # Application enum
+│   ├── FiveTuple.java            # Normalized bidirectional flow key
+│   ├── Flow.java                 # Per-flow state (SNI, app, blocked, counters)
+│   ├── RawPacket.java            # Raw bytes + PCAP timestamp
+│   ├── ParsedPacket.java         # Parsed headers + payload offsets
+│   └── TrafficReport.java        # Structured report for JSON/CSV/API
+├── io/
+│   ├── PcapReader.java           # PCAP input (global + packet headers)
+│   └── PcapWriter.java           # PCAP output
+├── parser/
+│   └── PacketParser.java         # Ethernet → IP → TCP/UDP parser
+├── inspector/
+│   ├── SniExtractor.java         # TLS Client Hello SNI parser
+│   └── HttpHostExtractor.java    # HTTP Host header parser
+├── engine/
+│   ├── AppClassifier.java        # Host/SNI → AppType mapping
+│   ├── ConnectionTracker.java    # Single-threaded flow table
+│   ├── FastPath.java             # Multi-threaded worker (own flow table)
+│   ├── LoadBalancer.java         # Routes packets to FastPaths
+│   ├── ReportBuilder.java        # Builds TrafficReport from counters
+│   ├── ReportExporter.java       # JSON / CSV serialization
+│   ├── RuleManager.java          # IP / App / Domain blocking logic
+│   └── ThreadSafeQueue.java      # BlockingQueue wrapper (capacity 10,000)
+├── api/
+│   ├── AnalysisJob.java          # Job state machine (PENDING → RUNNING → COMPLETED)
+│   ├── AnalysisService.java      # Async job orchestration
+│   └── DpiController.java        # REST endpoints
+├── DpiSimple.java                # Single-threaded CLI entry
+├── DpiEngine.java                # Multi-threaded CLI entry
+├── DpiLauncher.java              # Smart launcher (CLI vs Server auto-detect)
+├── DpiApiApplication.java        # Spring Boot bootstrap
+└── PcapGenerator.java            # Synthetic PCAP generator for testing
+
+src/main/resources/
+├── application.properties        # Server port, multipart limits
+└── static/
+    └── index.html                # Dashboard (Chart.js, vanilla JS)
+```
+
+---
 
 ## Prerequisites
 
-- JDK 17+ installed
-- Maven 3.8+ installed and available on `PATH`
+- **Java 17** or later
+- **Maven 3.8** or later
+- **Browser** with internet access (Chart.js loads from CDN)
 
-Check:
-
+Verify:
 ```bash
 java -version
-javac -version
-mvn -v
+mvn -version
 ```
+
+---
 
 ## Build
 
-From project root:
-
 ```bash
+cd dpi-engine
 mvn clean package
 ```
 
-Artifacts:
-- `target/dpi-engine.jar`
+Produces `target/dpi-engine.jar` (Spring Boot fat JAR).
 
-## Run
+---
 
-### 1) Generate sample PCAP
+## CLI Usage
 
-```bash
-java -cp target/classes dpi.PcapGenerator input.pcap
-```
+The launcher auto-detects CLI mode when the first two arguments end in `.pcap`.
 
-### 2) Run multi-threaded engine (default)
-
-```bash
-java -jar target/dpi-engine.jar input.pcap output.pcap
-```
-
-### 3) Run single-threaded mode
-
+### Basic analysis
 ```bash
 java -jar target/dpi-engine.jar input.pcap output.pcap --simple
 ```
 
-## CLI Options
-
-Usage:
-
-```text
-java -jar target/dpi-engine.jar <input.pcap> <output.pcap> [options]
+### With blocking rules
+```bash
+java -jar target/dpi-engine.jar input.pcap output.pcap      --simple      --block-app YOUTUBE      --block-domain facebook      --block-ip 192.168.1.50
 ```
 
-Options:
-- `--simple`
-  - Use single-threaded processing (`DpiSimple`).
-- `--lbs <n>`
-  - Number of load balancer threads (multi-thread mode only).
-  - Default: `2`.
-- `--fps <n>`
-  - FastPath workers per load balancer (multi-thread mode only).
-  - Default: `2`.
-- `--block-app <App>`
-  - Block app traffic by enum name.
-  - Can be repeated.
-- `--block-ip <IP>`
-  - Block by source IPv4 string.
-  - Can be repeated.
-- `--block-domain <domain>`
-  - Block if SNI/Host contains substring (case-insensitive).
-  - Can be repeated.
+### With report export
+```bash
+java -jar target/dpi-engine.jar input.pcap output.pcap      --simple      --block-app YOUTUBE      --report-json report.json      --report-csv report.csv
+```
 
-### Supported app names for `--block-app`
+### Multi-threaded engine
+```bash
+java -jar target/dpi-engine.jar input.pcap output.pcap      --lbs 2      --fps 2      --block-app TIKTOK
+```
 
-`UNKNOWN`, `HTTP`, `HTTPS`, `DNS`, `YOUTUBE`, `FACEBOOK`, `GOOGLE`, `TWITTER`, `NETFLIX`, `TIKTOK`, `GITHUB`, `AMAZON`
+**CLI Options:**
 
-Examples:
+| Flag | Description |
+|------|-------------|
+| `--simple` | Use single-threaded engine |
+| `--lbs N` | Number of load balancers (multi-threaded only) |
+| `--fps N` | FastPaths per load balancer (multi-threaded only) |
+| `--block-app APP` | Block by application type (e.g., `YOUTUBE`) |
+| `--block-ip IP` | Block by source/destination IPv4 address |
+| `--block-domain STR` | Block if SNI/Host contains substring |
+| `--report-json PATH` | Export structured report to JSON |
+| `--report-csv PATH` | Export report to CSV |
+
+---
+
+## REST API
+
+Start the server:
+```bash
+mvn spring-boot:run
+```
+Base URL: `http://localhost:8080`
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/analyze` | Upload PCAP + rules, returns job ID |
+| `GET` | `/api/jobs/{id}` | Poll job status |
+| `GET` | `/api/jobs/{id}/report` | Get JSON report |
+| `GET` | `/api/jobs/{id}/output` | Download filtered PCAP |
+| `GET` | `/api/jobs/{id}/report.csv` | Download CSV report |
+
+### Example: cURL workflow
 
 ```bash
-# Block YouTube + Facebook domains
-java -jar target/dpi-engine.jar input.pcap output.pcap \
-  --block-app youtube \
-  --block-domain facebook.com
+# 1. Submit analysis job
+curl -X POST http://localhost:8080/api/analyze   -F "pcap=@test.pcap"   -F "blockApp=YOUTUBE"   -F "blockDomain=facebook"   -F "blockIp=192.168.1.50"   -F "simple=false"   -F "lbs=2"   -F "fps=2"
+
+# Response: {"id":"a1b2c3d4-...","status":"PENDING"}
+
+# 2. Poll until COMPLETED
+curl http://localhost:8080/api/jobs/a1b2c3d4-...
+
+# 3. Get JSON report
+curl http://localhost:8080/api/jobs/a1b2c3d4-.../report
+
+# 4. Download filtered PCAP
+curl -O -J http://localhost:8080/api/jobs/a1b2c3d4-.../output
+
+# 5. Download CSV
+curl -O -J http://localhost:8080/api/jobs/a1b2c3d4-.../report.csv
 ```
+
+---
+
+## Web Dashboard
+
+Open `http://localhost:8080` in your browser after starting the server.
+
+### Workflow
+
+1. **Upload PCAP** — Click *Choose File*, select `.pcap`.
+2. **Select Engine Mode** — *Simple* or *Multi-threaded*.
+3. **Add Rules** — Type and press Enter to create tags:
+   - Applications: `YOUTUBE`, `FACEBOOK`, `TIKTOK` …
+   - Domains: `facebook`, `google` … (substring match)
+   - IPs: `192.168.1.50` …
+4. **Analyze** — Click *Analyze Traffic*. Progress bar auto-updates.
+5. **Review Results** — Metrics cards, doughnut chart (app breakdown), bar chart (allowed vs blocked), SNI table.
+6. **Download** — *Output PCAP* (filtered capture) or *Report CSV*.
+
+### Dashboard Features
+- Drag-and-drop rule entry with removable tags
+- Live polling (1-second intervals) during analysis
+- Responsive charts via Chart.js
+- Dark-themed UI optimized for network operations centers
+
+---
+
+## Report Format
+
+### JSON Structure
+```json
+{
+  "totalPackets": 77,
+  "totalBytes": 5738,
+  "tcpPackets": 73,
+  "udpPackets": 4,
+  "forwarded": 69,
+  "dropped": 8,
+  "processingTimeMs": 45,
+  "appBreakdown": [
+    {
+      "appType": "HTTPS",
+      "count": 39,
+      "percentage": 50.6,
+      "blocked": false,
+      "bar": "##########"
+    },
+    {
+      "appType": "YouTube",
+      "count": 4,
+      "percentage": 5.2,
+      "blocked": true,
+      "bar": "#"
+    }
+  ],
+  "detectedSnis": [
+    { "sni": "www.youtube.com", "appType": "YouTube" },
+    { "sni": "www.facebook.com", "appType": "Facebook" }
+  ]
+}
+```
+
+### CSV Structure
+```csv
+Metric,Value
+Total Packets,77
+Total Bytes,5738
+...
+
+Application,Count,Percentage,Blocked
+HTTPS,39,50.6,false
+YouTube,4,5.2,true
+
+SNI,Application
+www.youtube.com,YouTube
+www.facebook.com,Facebook
+```
+
+---
+
+## Test Data Generation
+
+Generate a synthetic PCAP with sample traffic for immediate testing:
 
 ```bash
-# Multi-thread tuning
-java -jar target/dpi-engine.jar input.pcap output.pcap --lbs 4 --fps 4
+# From compiled classes (not the fat JAR)
+java -cp target/classes dpi.PcapGenerator test.pcap
 ```
 
-```bash
-# Block specific source hosts
-java -jar target/dpi-engine.jar input.pcap output.pcap \
-  --block-ip 192.168.1.10 \
-  --block-ip 10.0.0.5
-```
+Generated traffic includes:
+- TLS Client Hello to `www.youtube.com`
+- TLS Client Hello to `www.facebook.com`
+- TLS Client Hello to `www.google.com`
+- HTTP GET to `example.com`
+- DNS query to `8.8.8.8`
+- Random TCP noise
 
-## Multi-threaded Pipeline Design
+---
 
-`Reader -> LoadBalancer(s) -> FastPath worker(s) -> Writer`
+## Roadmap
 
-- Reader thread parses packets and routes to LB queues by flow hash.
-- LB threads preserve flow affinity by hashing normalized `FiveTuple`.
-- FastPath workers own private flow tables (no shared flow lock contention).
-- Writer thread emits allowed packets in read/processing order from output queue consumption.
-- Poison-pill packets coordinate graceful shutdown of each stage.
+### Phase 1 — Core Engine ✅
+- [x] PCAP I/O
+- [x] Protocol parsing (Ethernet / IPv4 / TCP / UDP)
+- [x] TLS SNI extraction
+- [x] HTTP Host extraction
+- [x] Application classification
+- [x] Rule engine (IP / App / Domain)
+- [x] Single-threaded & multi-threaded engines
 
-## Classification Logic
+### Phase 2 — Reporting & API ✅
+- [x] Structured JSON/CSV reports
+- [x] Spring Boot REST API
+- [x] Async job queue
+- [x] Web dashboard with Chart.js
 
-1. Attempt SNI extraction for TCP/443 payloads.
-2. If no SNI, attempt HTTP Host extraction.
-3. Classify by host/SNI keyword mapping:
-   - YouTube, Facebook/Instagram, Google, Twitter, Netflix, TikTok, GitHub, Amazon
-4. Fallback by destination port:
-   - `443 -> HTTPS`
-   - `80 -> HTTP`
-   - `53 -> DNS`
-5. Otherwise `UNKNOWN`.
+### Phase 3 — Detection Improvements (Next)
+- [ ] DNS query/response parsing (UDP/53)
+- [ ] TLS JA3 fingerprint hooks
+- [ ] HTTP method/path statistics
+- [ ] Direction-aware rules (src vs dst matching)
 
-## Current Scope and Limitations
+### Phase 4 — Enterprise Features
+- [ ] Time-based rules (block only during business hours)
+- [ ] Allowlist override for blocklist
+- [ ] Rule priority & actions (ALLOW, DROP, LOG-ONLY)
+- [ ] H2/PostgreSQL persistence for historical search
+- [ ] Live capture mode (`--iface eth0`)
+- [ ] Unit tests + benchmark mode (throughput/latency metrics)
 
-- Ethernet + IPv4 only.
-- TCP and UDP only.
-- PCAP only (not PCAPNG).
-- TLS parsing only inspects ClientHello SNI and only when destination port is 443.
-- HTTP Host parsing expects recognizable HTTP request-line methods.
-- App classification is heuristic keyword-based, not signature/ML based.
-
-## Troubleshooting
-
-### Maven command not found
-
-- Open a new terminal after installing Maven.
-- Verify with:
-
-```bash
-mvn -v
-```
-
-- Ensure `%MAVEN_HOME%/bin` is on `PATH`.
-
-### IDE shows red lines but build works
-
-- Reimport Maven project.
-- Mark `src/main/java` as Sources Root.
-- Ensure Project SDK is Java 17+.
-- Invalidate IDE caches and restart.
-
-### Invalid or unsupported PCAP
-
-- `PcapReader` currently expects:
-  - PCAP global header (not PCAPNG)
-  - Link type 1 (Ethernet)
-
-## Development Notes
-
-- Main class configured in `pom.xml`: `dpi.DpiEngine`
-- Default jar name: `dpi-engine.jar`
-- `maven-shade-plugin` is configured at `package` phase.
-
-## Quick Start (copy/paste)
-
-```bash
-mvn clean package
-java -cp target/classes dpi.PcapGenerator input.pcap
-java -jar target/dpi-engine.jar input.pcap output.pcap --lbs 2 --fps 2
-```
-
+---
