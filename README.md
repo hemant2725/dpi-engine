@@ -154,23 +154,6 @@ flowchart TB
     E -->|No| F["FORWARD"]
 ```
 
-### 8) Data Flow Architecture (Full System)
-
-```mermaid
-flowchart TB
-    U["Telegram User"]
-    T["Telegram Bot"]
-    API["API Server (Express)"]
-    RDS["Redis (conversation state)"]
-    AI["AI Content Engine"]
-    DB["Post + PlatformPost (DB)"]
-    Q["BullMQ Queue"]
-    WKR["Worker"]
-    PAPI["Platform APIs"]
-
-    U --> T --> API --> RDS --> AI --> DB --> Q --> WKR --> PAPI
-```
-
 ---
 
 ## Architecture
@@ -345,6 +328,16 @@ Workflow:
 4. Click `Analyze Traffic`.
 5. Review charts/tables.
 6. Download output PCAP and CSV report.
+
+### Dashboard Screenshots
+
+#### Web Dashboard
+
+![Web dashboard](image.png)
+
+#### Working and Visualization
+
+![Working and visualization](image-1.png)
 
 ---
 
