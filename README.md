@@ -492,12 +492,10 @@ Open `http://localhost:8080` after starting the server.
 ### Screenshots
 
 #### Web Dashboard
-
-![Web Dashboard](assets/image.png)
+![Web Dashboard](image.png)
 
 #### Working and Visualization
-
-![Working and Visualization](assets/image-1.png)
+![Working and Visualization](image-1.png)
 
 ---
 
