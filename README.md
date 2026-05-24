@@ -219,7 +219,7 @@ sequenceDiagram
     Browser->>Server: Key Exchange
     Browser<<->>Server: Encrypted Application Data
 
-    Note over Browser,Server: SniExtractor reads the ClientHello only.\nAll subsequent records are encrypted.
+    Note over Browser,Server: SniExtractor reads the ClientHello only.\n All subsequent records are encrypted.
 ```
 
 ### 7. Blocking Decision Flow
